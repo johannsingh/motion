@@ -1,0 +1,7 @@
+.env*
+!.env.example
+test-results/
+playwright-report/
+motion-desktop.png
+motion-mobile.png
+*.tsbuildinfo

@@ -1,0 +1,57 @@
+{
+  "supabase": {
+    "project_id": "venujhemegflfiszhtec",
+    "organization_id": "irjqagnbararaeqpqxml",
+    "region": "eu-west-2",
+    "quoted_monthly_project_cost": 0,
+    "schema_applied": [
+      "motion_initial",
+      "harden_motion_access"
+    ],
+    "live_privacy_verification": "passed",
+    "site_url": "https://motion-accountability.vercel.app",
+    "redirect_urls": [
+      "https://motion-accountability.vercel.app/auth/callback",
+      "http://localhost:3000/auth/callback"
+    ]
+  },
+  "demo_url": "https://motion-phone-demo.alexandermackay.chatgpt.site",
+  "vercel_production_deployed": true,
+  "live_whoop_configured": false,
+  "vercel": {
+    "project_id": "prj_XNNeNSVsqgsj0K2TXbbmSHWY0rZU",
+    "team_id": "team_dhtKDILI2l9YP9JhGeJLcm9A",
+    "production_url": "https://motion-accountability.vercel.app",
+    "deployment_id": "dpl_Eqd2iWc1Etex92BvtRi68Zp9pLA3"
+  },
+  "local_url": "http://localhost:3000",
+  "local_checks": {
+    "unit_privacy_security_tests": 16,
+    "demo_browser_journeys": 8,
+    "typecheck": "passed",
+    "production_build": "passed",
+    "ui_regression_checks": 6
+  },
+  "supabase_auth_redirects": "configured and verified after dashboard reload",
+  "real_account_journey_verified": false,
+  "source_archive_sha256": "66ce71e8dae63bc5753196c1c9708f7d06c12b23bbe357c61aa343b740e1672d",
+  "ui_audit_fixes": {
+    "findings_addressed": 17,
+    "date": "2026-09-27",
+    "viewport_widths": [
+      320,
+      390,
+      768,
+      1440
+    ],
+    "large_text_and_spacing": "passed",
+    "reduced_motion": "passed",
+    "palette_contrast": "passed"
+  },
+  "mobile_visual_parity": {
+    "shared_wordmark": true,
+    "hero_artwork_restored": true,
+    "navigation_destinations": 5,
+    "browser_checks_passed": 14
+  }
+}

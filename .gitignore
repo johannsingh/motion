@@ -1,0 +1,12 @@
+node_modules/
+.next/
+.env*
+!.env.example
+.vercel/
+test-results/
+playwright-report/
+*.tsbuildinfo
+.repair/
+motion-desktop.png
+motion-mobile.png
+.DS_Store

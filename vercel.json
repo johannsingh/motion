@@ -1,0 +1,1 @@
+{"framework":"nextjs","crons":[{"path":"/api/whoop/reconcile","schedule":"0 7 * * *"}]}
