@@ -79,7 +79,9 @@ create policy entries_read on public.entries for select to authenticated
   );
 
 -- Atomic join: clones the challenge's habit definition for the joining member.
-create function public.join_challenge(token text) returns uuid language plpgsql security definer set search_path=public,extensions as $$
+-- Follows the hardened pattern from 20260927172350 (private schema + thin public
+-- security-invoker wrapper), not the pre-hardening pattern from the initial migration.
+create function private.join_challenge(token text) returns uuid language plpgsql security definer set search_path=public,extensions as $$
 declare c uuid; ch record; h uuid; begin
   if auth.uid() is null then raise exception 'Sign in first'; end if;
   select challenge_id into c from challenge_invites
@@ -96,10 +98,7 @@ declare c uuid; ch record; h uuid; begin
   insert into challenge_members(challenge_id, user_id, habit_id) values (c, auth.uid(), h);
   return c;
 end;$$;
-revoke all on function public.join_challenge(text) from public, anon;
-grant execute on function public.join_challenge(text) to authenticated;
-
-create function public.create_challenge_invite(challenge uuid) returns text language plpgsql security definer set search_path=public,extensions as $$
+create function private.create_challenge_invite(challenge uuid) returns text language plpgsql security definer set search_path=public,extensions as $$
 declare t text; begin
   if auth.uid() is null then raise exception 'Sign in first'; end if;
   if not exists (select 1 from challenges where id = challenge and creator_id = auth.uid()) then
@@ -110,8 +109,15 @@ declare t text; begin
     values (encode(digest(t,'sha256'),'hex'), challenge, auth.uid());
   return t;
 end;$$;
-revoke all on function public.create_challenge_invite(uuid) from public, anon;
-grant execute on function public.create_challenge_invite(uuid) to authenticated;
+revoke all on function private.join_challenge(text), private.create_challenge_invite(uuid) from public, anon;
+grant execute on function private.join_challenge(text), private.create_challenge_invite(uuid) to authenticated;
+
+create function public.join_challenge(token text) returns uuid language sql security invoker set search_path='' as
+  $$select private.join_challenge(token);$$;
+create function public.create_challenge_invite(challenge uuid) returns text language sql security invoker set search_path='' as
+  $$select private.create_challenge_invite(challenge);$$;
+revoke all on function public.join_challenge(text), public.create_challenge_invite(uuid) from public, anon;
+grant execute on function public.join_challenge(text), public.create_challenge_invite(uuid) to authenticated;
 
 grant select, insert on public.challenges to authenticated;
 grant select on public.challenge_members to authenticated;

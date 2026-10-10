@@ -61,19 +61,25 @@ flowchart LR
 
 - **Binds:** `challenges`, `challenge_members`, leaderboard
 - **Prevents:** per-member target drift that would force ratio/percentage normalization to rank fairly. [ADOPTED — user: "everyone should have the same habits in the group."]
-- **Rule:** `challenges` holds exactly one `{title, category, period, kind, target, unit}`. Joining a challenge clones that definition verbatim into a new row in the member's own `habits`, tagged via `challenge_members.habit_id`. Ranking never compares across differing targets.
+- **Rule:** `challenges` holds exactly one `{title, category, period, kind, target, unit}`. Joining a challenge clones that definition verbatim into a new row in the member's own `habits`, tagged via `challenge_members.habit_id`. Ranking never compares across differing targets. **A cloned habit row is frozen while its `challenge_members` link is active**: the existing generic habit-edit/delete UI (unmodified under AD-1) must not be allowed to change a clone's `target`/`period`/`kind`/`unit` or delete it out from under a live challenge — enforced by a Postgres trigger/check (not a per-client UI convention, since web and iOS are independent peers under AD-3 and must not diverge on this). Leaving a challenge is the only sanctioned way to free the row (mechanism deferred — see Deferred). Creating a challenge atomically enrolls its creator as the first `challenge_members` row (via the same function that creates the `challenges` row, not a bare client-side insert) so creator membership is never ambiguous between clients.
 
 ### AD-3 — Clients reach Supabase directly; Next.js is secrets-only
 
 - **Binds:** iOS client, Next.js API
 - **Prevents:** a duplicate "mobile API" layer whose contract can drift from Supabase's own RLS-enforced one.
-- **Rule:** the iOS app authenticates and queries Supabase directly via `supabase-swift`. It calls the Next.js API only for the three WHOOP operations that require a server-held secret (OAuth code exchange, webhook, cron sync trigger). No new Next.js endpoint may be added solely to serve the iOS app data Supabase could serve directly under RLS.
+- **Rule:** the iOS app authenticates and queries Supabase directly via `supabase-swift`. The only Next.js routes it ever calls are the three already client-invoked WHOOP endpoints — `connect` (GET, redirects to WHOOP's OAuth page), `disconnect` (POST), `sync` (POST). `callback` (the OAuth redirect target), `webhook` (WHOOP-initiated), and `reconcile` (cron-initiated, `CRON_SECRET`-gated) are never called by any client, mobile or web. No new Next.js endpoint may be added solely to serve the iOS app data Supabase could serve directly under RLS.
+
+### AD-7 — WHOOP's client-facing routes need bearer-auth support before iOS can call them [gap, not yet closed]
+
+- **Binds:** `app/api/whoop/connect`, `disconnect`, `sync`
+- **Prevents:** AD-3 being assumed workable when it isn't yet. As written, `authenticated()` reads a browser cookie session (`@supabase/ssr`) and `sameOrigin()` requires an `Origin` header matching the app's own origin — a native `URLSession` request sends neither. Calling these routes from iOS today fails outright.
+- **Rule:** before the iOS WhoopLink feature can ship, these three routes must additionally accept `Authorization: Bearer <supabase JWT>`, verify it server-side via Supabase (not the cookie path), and `sameOrigin()` must be relaxed for bearer-authenticated non-browser requests (e.g. skip the origin check when a valid bearer token is present) rather than removed outright for the cookie-based web path.
 
 ### AD-4 — Two integration sync mechanisms, by necessity
 
 - **Binds:** WHOOP integration, HealthKit integration
 - **Prevents:** a future attempt to build a server-side HealthKit poller — Apple provides no such access.
-- **Rule:** WHOOP stays server-pulled (webhook + cron, service-role, as already built). HealthKit is device-pushed: the iOS app reads `HKObserverQuery` results itself and writes `entries` rows to Supabase as the authenticated user. These are different mechanisms serving the same `entries` table — not two ad hoc variants of one.
+- **Rule:** WHOOP stays server-pulled (webhook + cron, service-role, as already built). HealthKit is device-pushed: the iOS app reads `HKObserverQuery` results itself and writes `entries` rows to Supabase as the authenticated user. These are different mechanisms serving the same `entries` table — not two ad hoc variants of one. **This requires a schema change, not just client code**: the existing `entries_insert` policy hardcodes `with check(user_id=auth.uid() and source_key='manual')`, which rejects a direct user-authenticated HealthKit write outright. The policy must be additively widened (e.g. also accepting `source_key like 'healthkit:%'` for `user_id=auth.uid()` inserts) before AD-5's "guaranteed foreground sync" can land a single row. Scope this in the same migration that adds the `challenges` tables, not as a surprise discovered mid-build.
 
 ### AD-5 — HealthKit background delivery is a latency optimization, not the sync path
 
@@ -81,11 +87,11 @@ flowchart LR
 - **Prevents:** shipping a leaderboard that silently goes stale on devices where background delivery throttles or stalls. [Verified via web research, Oct 2026: `enableBackgroundDelivery` frequency is inconsistent across devices — reports of ~hourly throttling and watchOS 26 delivery silently stopping until restart.]
 - **Rule:** `HKObserverQuery` + `enableBackgroundDelivery` registers for opportunistic updates, but every app foreground/launch triggers an unconditional, synchronous HealthKit → Supabase sync. The guaranteed path is foreground sync; background delivery only improves on it when the OS cooperates.
 
-### AD-6 — Leaderboard ranking is computed server-side
+### AD-6 — Leaderboard ranking AND its period-bounds arithmetic are computed server-side
 
-- **Binds:** leaderboard / challenge progress
-- **Prevents:** the existing TypeScript `progress()` logic (period bounds, manual-vs-imported precedence) and an independent Swift reimplementation diverging on edge cases (DST boundaries, period rollover, etc.).
-- **Rule:** ranking is a Postgres view/function joining `challenge_members → habits → entries`, porting the period-bounds and value-precedence rules already proven in `lib/domain.ts`. Neither client computes its own ranking; both read the same ranked result.
+- **Binds:** leaderboard / challenge progress, any client-side display of period/deadline info (e.g. a WhatsApp share card's "days left")
+- **Prevents:** the existing TypeScript `progress()` logic (period bounds, manual-vs-imported precedence) and an independent Swift reimplementation diverging on edge cases (DST boundaries, period rollover, etc.) — including indirectly, via a client recomputing *inputs* to rank (like period boundaries) even if it never computes rank itself.
+- **Rule:** ranking AND the period start/end it's based on are a single Postgres view/function joining `challenge_members → habits → entries`, porting the rules already proven in `lib/domain.ts`. Neither client computes its own ranking *or* its own period boundaries — e.g. a share card's "2 days left" must read that number from the server payload, never recompute it from `Date()` locally. If Realtime is used for live leaderboard updates (see Deferred), table-change events are an invalidation signal only — they trigger a re-fetch of the ranked view, never a client-side re-derivation of order from the raw row deltas.
 
 ## Consistency Conventions
 
@@ -93,7 +99,7 @@ flowchart LR
 | --- | --- |
 | Naming (entities, files, interfaces, events) | New tables/functions follow existing snake_case SQL conventions (`challenge_members`, `join_challenge`). Swift types mirror server entity names in UpperCamelCase (`ChallengeMember`), matching the existing TS convention of 1:1 server-entity-to-client-type naming in `lib/domain.ts`. |
 | Data & formats (ids, dates, error shapes, envelopes) | UUIDs for all ids (`gen_random_uuid()`), `date` (not timestamp) for the day-granularity fields already used by `entries.day`, ISO-8601 via Supabase's default Postgres↔JSON encoding — no new date format introduced for the iOS client. |
-| State & cross-cutting (mutation, errors, logging, config, auth) | All writes go through RLS-checked client calls or `security definer` functions (`join_challenge`, `create_challenge_invite`), mirroring the existing `create_invite`/`accept_invite` pattern — no direct unguarded table writes for multi-step operations. Auth session persistence uses `supabase-swift`'s default Keychain-backed storage. |
+| State & cross-cutting (mutation, errors, logging, config, auth) | All writes go through RLS-checked client calls or `security definer` functions. New definer functions (`join_challenge`, `create_challenge_invite`, `create_challenge`) follow the **hardened** pattern from `20260927172350_harden_motion_access.sql` — the real logic lives in `private` as `security definer`, with a thin `public` wrapper as `security invoker` — not the pre-hardening pattern from the initial migration. Auth session persistence uses `supabase-swift`'s default Keychain-backed storage. |
 
 ## Stack
 
@@ -149,6 +155,6 @@ erDiagram
 - **Android client, web parity for the competitive layer** — out of scope per the product brief; revisit once the iOS pilot validates the loop.
 - **Screen Time integration** — confirmed not viable (no cross-user export path on Apple's API); stays out.
 - **Monetization** — not designed; free for v1.
-- **Challenge lifecycle detail** (ending/archiving a challenge, re-matching after a target change, leaving a challenge mid-run) — left to story-level detail; AD-2's "one definition, cloned" rule constrains it but doesn't fully specify it yet.
-- **Realtime leaderboard updates** (Supabase Realtime subscriptions vs. pull-to-refresh) — either fits AD-6 without changing it; pick at implementation time based on how much polish the pilot week allows.
+- **Challenge lifecycle detail** (ending/archiving a challenge, a `leave_challenge()` function to unfreeze a cloned habit per AD-2, re-matching after a target change) — left to story-level detail; AD-2 constrains it (frozen while active, leaving is the only sanctioned exit) but doesn't fully specify the mechanism yet.
+- **Realtime vs. pull-to-refresh for the leaderboard** — either fits AD-6 as now written (Realtime as invalidation-only signal); pick at implementation time based on how much polish the pilot week allows.
 - **Testing strategy for the iOS app** — the web app has an established Vitest/Playwright culture; the Swift equivalent (XCTest/Swift Testing for the ranking/HealthKit-mapping logic at minimum) is a story-level decision, not fixed here.
