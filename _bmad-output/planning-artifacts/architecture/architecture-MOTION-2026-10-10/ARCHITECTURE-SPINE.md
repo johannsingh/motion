@@ -155,6 +155,6 @@ erDiagram
 - **Android client, web parity for the competitive layer** — out of scope per the product brief; revisit once the iOS pilot validates the loop.
 - **Screen Time integration** — confirmed not viable (no cross-user export path on Apple's API); stays out.
 - **Monetization** — not designed; free for v1.
-- **Challenge lifecycle detail** (ending/archiving a challenge, a `leave_challenge()` function to unfreeze a cloned habit per AD-2, re-matching after a target change) — left to story-level detail; AD-2 constrains it (frozen while active, leaving is the only sanctioned exit) but doesn't fully specify the mechanism yet.
+- **Challenge lifecycle detail** (ending/archiving a challenge, a `leave_challenge()` function to unfreeze a cloned habit per AD-2, re-matching after a target change) — left to story-level detail; AD-2's freeze trigger and atomic `create_challenge`/`join_challenge` enrollment are now in the draft migration, but there is still no exit path out of a challenge.
 - **Realtime vs. pull-to-refresh for the leaderboard** — either fits AD-6 as now written (Realtime as invalidation-only signal); pick at implementation time based on how much polish the pilot week allows.
 - **Testing strategy for the iOS app** — the web app has an established Vitest/Playwright culture; the Swift equivalent (XCTest/Swift Testing for the ranking/HealthKit-mapping logic at minimum) is a story-level decision, not fixed here.

@@ -46,10 +46,12 @@ revoke all on function private.in_challenge(uuid) from public;
 grant execute on function private.in_challenge(uuid) to authenticated;
 
 -- Members can see the challenge and roster of any challenge they belong to.
+-- No client-side insert policy on challenges: creation only happens through
+-- create_challenge() below, which atomically enrolls the creator as the first
+-- member (AD-2) - a bare insert policy would let a client create a challenge
+-- with no members, leaving creator self-enrollment ambiguous between clients.
 create policy challenges_read on public.challenges for select to authenticated
   using (private.in_challenge(id));
-create policy challenges_insert on public.challenges for insert to authenticated
-  with check (creator_id = (select auth.uid()));
 create policy challenge_members_read on public.challenge_members for select to authenticated
   using (private.in_challenge(challenge_id));
 create policy challenge_invites_read on public.challenge_invites for select to authenticated
@@ -78,11 +80,38 @@ create policy entries_read on public.entries for select to authenticated
     )
   );
 
--- Atomic join: clones the challenge's habit definition for the joining member.
+-- Shared enrollment step: clones the challenge's habit definition for a member
+-- and records their membership. Used by both join_challenge (an invited member)
+-- and create_challenge (the creator enrolling themself) so there is exactly one
+-- path that creates a challenge_members row - no second client-side variant to drift.
+create function private.enroll_in_challenge(c uuid, uid uuid) returns uuid language plpgsql security definer set search_path=public,extensions as $$
+declare ch record; h uuid; begin
+  select * into ch from challenges where id = c;
+  insert into habits(user_id, title, category, period, kind, target, unit, icon, shared, provider, versions)
+    values (uid, ch.title, ch.category, ch.period, ch.kind, ch.target, ch.unit, ch.icon, true, 'manual',
+      jsonb_build_array(jsonb_build_object('effective_on', ch.starts_on, 'target', ch.target)))
+    returning id into h;
+  insert into challenge_members(challenge_id, user_id, habit_id) values (c, uid, h);
+  return h;
+end;$$;
+
+-- Atomic creation: inserts the challenge row, then enrolls the creator via the
+-- same path a joining member takes (AD-2 - no ambiguity between clients).
+create function private.create_challenge(p_title text, p_category text, p_period text, p_kind text, p_target numeric, p_unit text, p_icon text default 'trophy', p_starts_on date default current_date, p_ends_on date default null) returns uuid language plpgsql security definer set search_path=public,extensions as $$
+declare c uuid; begin
+  if auth.uid() is null then raise exception 'Sign in first'; end if;
+  insert into challenges(creator_id, title, category, period, kind, target, unit, icon, starts_on, ends_on)
+    values (auth.uid(), p_title, p_category, p_period, p_kind, p_target, p_unit, p_icon, p_starts_on, p_ends_on)
+    returning id into c;
+  perform private.enroll_in_challenge(c, auth.uid());
+  return c;
+end;$$;
+
+-- Atomic join: validates the invite, then enrolls via the same shared step.
 -- Follows the hardened pattern from 20260927172350 (private schema + thin public
 -- security-invoker wrapper), not the pre-hardening pattern from the initial migration.
 create function private.join_challenge(token text) returns uuid language plpgsql security definer set search_path=public,extensions as $$
-declare c uuid; ch record; h uuid; begin
+declare c uuid; begin
   if auth.uid() is null then raise exception 'Sign in first'; end if;
   select challenge_id into c from challenge_invites
     where token_hash = encode(digest(token,'sha256'),'hex') and expires_at > now();
@@ -90,12 +119,7 @@ declare c uuid; ch record; h uuid; begin
   if exists (select 1 from challenge_members where challenge_id = c and user_id = auth.uid()) then
     raise exception 'Already in this challenge';
   end if;
-  select * into ch from challenges where id = c;
-  insert into habits(user_id, title, category, period, kind, target, unit, icon, shared, provider, versions)
-    values (auth.uid(), ch.title, ch.category, ch.period, ch.kind, ch.target, ch.unit, ch.icon, true, 'manual',
-      jsonb_build_array(jsonb_build_object('effective_on', ch.starts_on, 'target', ch.target)))
-    returning id into h;
-  insert into challenge_members(challenge_id, user_id, habit_id) values (c, auth.uid(), h);
+  perform private.enroll_in_challenge(c, auth.uid());
   return c;
 end;$$;
 create function private.create_challenge_invite(challenge uuid) returns text language plpgsql security definer set search_path=public,extensions as $$
@@ -109,17 +133,53 @@ declare t text; begin
     values (encode(digest(t,'sha256'),'hex'), challenge, auth.uid());
   return t;
 end;$$;
-revoke all on function private.join_challenge(text), private.create_challenge_invite(uuid) from public, anon;
-grant execute on function private.join_challenge(text), private.create_challenge_invite(uuid) to authenticated;
+revoke all on function private.enroll_in_challenge(uuid,uuid), private.create_challenge(text,text,text,text,numeric,text,text,date,date), private.join_challenge(text), private.create_challenge_invite(uuid) from public, anon;
+grant execute on function private.create_challenge(text,text,text,text,numeric,text,text,date,date), private.join_challenge(text), private.create_challenge_invite(uuid) to authenticated;
 
+create function public.create_challenge(p_title text, p_category text, p_period text, p_kind text, p_target numeric, p_unit text, p_icon text default 'trophy', p_starts_on date default current_date, p_ends_on date default null) returns uuid language sql security invoker set search_path='' as
+  $$select private.create_challenge(p_title, p_category, p_period, p_kind, p_target, p_unit, p_icon, p_starts_on, p_ends_on);$$;
 create function public.join_challenge(token text) returns uuid language sql security invoker set search_path='' as
   $$select private.join_challenge(token);$$;
 create function public.create_challenge_invite(challenge uuid) returns text language sql security invoker set search_path='' as
   $$select private.create_challenge_invite(challenge);$$;
-revoke all on function public.join_challenge(text), public.create_challenge_invite(uuid) from public, anon;
-grant execute on function public.join_challenge(text), public.create_challenge_invite(uuid) to authenticated;
+revoke all on function public.create_challenge(text,text,text,text,numeric,text,text,date,date), public.join_challenge(text), public.create_challenge_invite(uuid) from public, anon;
+grant execute on function public.create_challenge(text,text,text,text,numeric,text,text,date,date), public.join_challenge(text), public.create_challenge_invite(uuid) to authenticated;
 
-grant select, insert on public.challenges to authenticated;
+grant select on public.challenges to authenticated;
 grant select on public.challenge_members to authenticated;
 grant select on public.challenge_invites to authenticated;
 revoke all on public.challenge_invites from anon;
+
+-- AD-4: HealthKit entries are written directly by the authenticated user (device-pushed),
+-- unlike WHOOP's service-role writes. The existing policies only allowed source_key='manual'.
+drop policy entries_insert on public.entries;
+create policy entries_insert on public.entries for insert to authenticated
+  with check (user_id = (select auth.uid()) and (source_key = 'manual' or source_key like 'healthkit:%'));
+drop policy entries_update on public.entries;
+create policy entries_update on public.entries for update to authenticated
+  using (user_id = (select auth.uid()) and (source_key = 'manual' or source_key like 'healthkit:%'))
+  with check (user_id = (select auth.uid()) and (source_key = 'manual' or source_key like 'healthkit:%'));
+drop policy entries_delete on public.entries;
+create policy entries_delete on public.entries for delete to authenticated
+  using (user_id = (select auth.uid()) and (source_key = 'manual' or source_key like 'healthkit:%'));
+
+-- AD-2: a habit cloned into an active challenge is frozen against the generic
+-- habit-edit/delete UI (which doesn't know challenges exist) - enforced in the
+-- database so web and iOS can't diverge on this, per AD-3's "independent peers" rule.
+create function private.block_challenge_habit_mutation() returns trigger language plpgsql set search_path=public as $$
+begin
+  if tg_op = 'DELETE' then
+    if exists (select 1 from challenge_members where habit_id = old.id) then
+      raise exception 'Leave the challenge before deleting this habit';
+    end if;
+    return old;
+  end if;
+  if exists (select 1 from challenge_members where habit_id = old.id)
+     and (new.target is distinct from old.target or new.period is distinct from old.period
+          or new.kind is distinct from old.kind or new.unit is distinct from old.unit) then
+    raise exception 'This habit is locked by an active challenge';
+  end if;
+  return new;
+end;$$;
+create trigger habits_challenge_lock before update or delete on public.habits
+  for each row execute function private.block_challenge_habit_mutation();
